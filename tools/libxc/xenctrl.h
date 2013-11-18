@@ -1136,6 +1136,15 @@ int xc_domain_set_memmap_limit(xc_interface *xch,
                                uint32_t domid,
                                unsigned long map_limitkb);
 
+int xc_domain_setvnuma(xc_interface *xch,
+                        uint32_t domid,
+                        uint16_t nr_vnodes,
+                        uint16_t nr_vcpus,
+                        vmemrange_t *vmemrange,
+                        unsigned int *vdistance,
+                        unsigned int *vcpu_to_vnode,
+                        unsigned int *vnode_to_pnode);
+
 #if defined(__i386__) || defined(__x86_64__)
 /*
  * PC BIOS standard E820 types and structure.
