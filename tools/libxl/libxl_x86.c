@@ -310,3 +310,126 @@ int libxl__arch_domain_create(libxl__gc *gc, libxl_domain_config *d_config,
 
     return ret;
 }
+
+/*
+ * Checks for the beginnig and end of RAM in e820 map for domain
+ * and aligns start of first and end of last vNUMA memory block to
+ * that map. vnode memory size are passed here Megabytes.
+ * For PV guest e820 map has fixed hole sizes.
+ */
+int libxl__vnuma_align_mem(libxl__gc *gc,
+                            uint32_t domid,
+                            libxl_domain_build_info *b_info, /* IN: mem sizes */
+                            vmemrange_t *memblks)        /* OUT: linux numa blocks in pfn */
+{
+    int i, j, rc;
+    uint64_t next_start_pfn, end_max = 0, size, mem_hole;
+    uint32_t nr;
+    struct e820entry map[E820MAX];
+    
+    if (b_info->nr_vnodes == 0)
+        return -EINVAL;
+    libxl_ctx *ctx = libxl__gc_owner(gc);
+
+    /* retreive e820 map for this host */
+    rc = xc_get_machine_memory_map(ctx->xch, map, E820MAX);
+
+    if (rc < 0) {
+        errno = rc;
+        return -EINVAL;
+    }
+    nr = rc;
+    rc = e820_sanitize(ctx, map, &nr, b_info->target_memkb,
+                       (b_info->max_memkb - b_info->target_memkb) +
+                       b_info->u.pv.slack_memkb);
+    if (rc)
+    {   
+        errno = rc;
+        return -EINVAL;
+    }
+
+    /* max pfn for this host */
+    for (j = nr - 1; j >= 0; j--)
+        if (map[j].type == E820_RAM) {
+            end_max = map[j].addr + map[j].size;
+            break;
+        }
+    
+    memset(memblks, 0, sizeof(*memblks) * b_info->nr_vnodes);
+    next_start_pfn = 0;
+
+    memblks[0].start = map[0].addr;
+
+    for(i = 0; i < b_info->nr_vnodes; i++) {
+        /* start can be not zero */
+        memblks[i].start += next_start_pfn; 
+        memblks[i].end = memblks[i].start + (b_info->vnuma_memszs[i] << 20);
+        
+        size = memblks[i].end - memblks[i].start;
+        /*
+         * For pv host with e820_host option turned on we need
+         * to rake into account memory holes. For pv host with
+         * e820_host disabled or unset, the map is contiguous 
+         * RAM region.
+         */ 
+        if (libxl_defbool_val(b_info->u.pv.e820_host)) {
+            while (mem_hole = e820_memory_hole_size(memblks[i].start,
+                                                 memblks[i].end, map, nr),
+                    memblks[i].end - memblks[i].start - mem_hole < size)
+            {
+                memblks[i].end += mem_hole;
+
+                if (memblks[i].end > end_max) {
+                    memblks[i].end = end_max;
+                    break;
+                }
+            }
+        }
+        next_start_pfn = memblks[i].end;
+    }
+    
+    if (memblks[i-1].end > end_max)
+        memblks[i-1].end = end_max;
+
+    return 0;
+}
+
+/* 
+ * Used for PV guest with e802_host enabled and thus
+ * having non-contiguous e820 memory map.
+ */
+unsigned long e820_memory_hole_size(unsigned long start,
+                                    unsigned long end,
+                                    struct e820entry e820[],
+                                    int nr)
+{
+    int i;
+    unsigned long absent, start_pfn, end_pfn;
+
+    absent = end - start;
+    for(i = 0; i < nr; i++) {
+        /* if not E820_RAM region, skip it and dont substract from absent */
+        if(e820[i].type == E820_RAM) {
+            start_pfn = e820[i].addr;
+            end_pfn =   e820[i].addr + e820[i].size;
+            /* beginning pfn is in this region? */
+            if (start >= start_pfn && start <= end_pfn) {
+                if (end > end_pfn)
+                    absent -= end_pfn - start;
+                else
+                    /* fit the region? then no absent pages */
+                    absent -= end - start;
+                continue;
+            }
+            /* found the end of range in this region? */
+            if (end <= end_pfn && end >= start_pfn) {
+                absent -= end - start_pfn;
+                /* no need to look for more ranges */
+                break;
+            }
+        }
+    }
+    return absent;
+}
+
+

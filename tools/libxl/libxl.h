@@ -281,10 +281,13 @@
 #include <netinet/in.h>
 #include <sys/wait.h> /* for pid_t */
 
+#include <xen/memory.h>
 #include <xentoollog.h>
 
 #include <libxl_uuid.h>
 #include <_libxl_list.h>
+
+#include <xen/vnuma.h>
 
 /* API compatibility. */
 #ifdef LIBXL_API_VERSION
@@ -390,6 +393,14 @@
 #ifndef LIBXL_EXTERNAL_CALLERS_ONLY
 #define LIBXL_EXTERNAL_CALLERS_ONLY /* disappears for callers outside libxl */
 #endif
+
+/*
+ * LIBXL_HAVE_BUILDINFO_VNUMA indicates that vnuma topology will be
+ * build for the guest upon request and with VM configuration.
+ * It will try to define best allocation for vNUMA
+ * nodes on real NUMA nodes.
+ */
+#define LIBXL_HAVE_BUILDINFO_VNUMA 1
 
 typedef uint8_t libxl_mac[6];
 #define LIBXL_MAC_FMT "%02hhx:%02hhx:%02hhx:%02hhx:%02hhx:%02hhx"
@@ -749,6 +760,15 @@ void libxl_vcpuinfo_list_free(libxl_vcpuinfo *, int nr_vcpus);
 
 void libxl_device_vtpm_list_free(libxl_device_vtpm*, int nr_vtpms);
 void libxl_vtpminfo_list_free(libxl_vtpminfo *, int nr_vtpms);
+
+int libxl_domain_setvnuma(libxl_ctx *ctx,
+                           uint32_t domid,
+                           uint16_t nr_vnodes,
+                           uint16_t nr_vcpus,
+                           vmemrange_t *vmemrange,
+                           unsigned int *vdistance,
+                           unsigned int *vcpu_to_vnode,
+                           unsigned int *vnode_to_pnode);
 
 /*
  * Devices

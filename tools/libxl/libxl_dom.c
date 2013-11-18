@@ -23,6 +23,7 @@
 #include <xc_dom.h>
 #include <xen/hvm/hvm_info_table.h>
 #include <xen/hvm/hvm_xs_strings.h>
+#include <libxl_vnuma.h>
 
 libxl_domain_type libxl__domain_type(libxl__gc *gc, uint32_t domid)
 {
@@ -201,6 +202,88 @@ static int numa_place_domain(libxl__gc *gc, uint32_t domid,
     return rc;
 }
 
+/* prepares vnode to pnode map for domain vNUMA memory allocation */
+int libxl__init_vnode_to_pnode(libxl__gc *gc, uint32_t domid,
+                        libxl_domain_build_info *info)
+{
+    int i, n, nr_nodes, rc;
+    uint64_t *mems;
+    unsigned long long *claim = NULL;
+    libxl_numainfo *ninfo = NULL;
+
+    rc = -1;
+    if (info->vnode_to_pnode == NULL) {
+        info->vnode_to_pnode = calloc(info->nr_vnodes,
+                                      sizeof(*info->vnode_to_pnode));
+        if (info->vnode_to_pnode == NULL)                                    
+            return rc; 
+    }
+
+    /* default setting */
+    for (i = 0; i < info->nr_vnodes; i++)
+        info->vnode_to_pnode[i] = VNUMA_NO_NODE;
+
+    /* Get NUMA info */
+    ninfo = libxl_get_numainfo(CTX, &nr_nodes);
+    if (ninfo == NULL || nr_nodes == 0) {
+        LOG(DEBUG, "No HW NUMA found.\n");
+        rc = 0;
+        goto vnmapout;
+    }
+
+    /* 
+     * check if we have any hardware NUMA nodes selected,
+     * otherwise VNUMA_NO_NODE set and used default allocation
+     */ 
+    if (libxl_bitmap_is_empty(&info->nodemap))
+        return 0;
+    mems = info->vnuma_memszs;
+    
+    /* check if all vnodes will fit in one node */
+    libxl_for_each_set_bit(n, info->nodemap) {
+        if(ninfo[n].free/1024 >= info->max_memkb  && 
+           libxl_bitmap_test(&info->nodemap, n))
+           {
+               /* 
+                * all domain v-nodes will fit one p-node n, 
+                * p-node n is a best candidate selected by automatic 
+                * NUMA placement.
+                */
+               for (i = 0; i < info->nr_vnodes; i++)
+                    info->vnode_to_pnode[i] = n;
+               /* we can exit, as we are happy with placement */
+               return 0;
+           }
+    }
+    /* Determine the best nodes to fit vNUMA nodes */
+    /* TODO: change algorithm. The current just fits the nodes
+     * Will be nice to have them also sorted by size 
+     * If no p-node found, will be set to NUMA_NO_NODE
+     */
+    claim = calloc(info->nr_vnodes, sizeof(*claim));
+    if (claim == NULL)
+        return rc;
+     
+    libxl_for_each_set_bit(n, info->nodemap)
+    {
+        for (i = 0; i < info->nr_vnodes; i++)
+        {
+            if (((claim[n] + (mems[i] << 20)) <= ninfo[n].free) &&
+                 /*vnode was not set yet */
+                 (info->vnode_to_pnode[i] == VNUMA_NO_NODE ) )
+            {
+                info->vnode_to_pnode[i] = n;
+                claim[n] += (mems[i] << 20);
+            }
+        }
+    }
+
+    rc = 0;
+ vnmapout:
+    if (claim) free(claim);
+    return rc;
+}
+
 int libxl__build_pre(libxl__gc *gc, uint32_t domid,
               libxl_domain_config *d_config, libxl__domain_build_state *state)
 {
@@ -235,6 +318,66 @@ int libxl__build_pre(libxl__gc *gc, uint32_t domid,
         if (rc)
             return rc;
     }
+
+    if (info->nr_vnodes > 0) {
+        /* The memory blocks will be formed here from sizes */
+        struct vmemrange *memrange = libxl__calloc(gc, info->nr_vnodes,
+                                                sizeof(*memrange));
+        if (memrange == NULL) {
+            LOG(DETAIL, "Failed to allocate memory for memory ranges.\n");
+            return ERROR_FAIL;
+        }
+
+        if (libxl__vnuma_align_mem(gc, domid, info, memrange) < 0) {
+            LOG(DETAIL, "Failed to align memory map.\n");
+            return ERROR_FAIL;
+        }
+
+        /* 
+        * If vNUMA vnode_to_pnode map defined, determine if we
+        * can disable automatic numa placement and place vnodes
+        * on specified pnodes.
+        * For now, if vcpu affinity specified, we will use 
+        * specified vnode to pnode map.
+        */
+        if (libxl__vnodemap_is_usable(gc, info) == 1) {
+
+            /* Will use user-defined vnode to pnode mask */
+        
+            libxl_defbool_set(&info->numa_placement, false);
+        }
+        else {
+            LOG(ERROR, "The allocation mask for vnuma nodes cannot be used.\n");
+            if (libxl_defbool_val(info->vnuma_placement)) {
+                
+                LOG(DETAIL, "Switching to automatic vnuma to pnuma placement\n.");
+                /* Construct the vnode to pnode mapping if possible */
+                if (libxl__init_vnode_to_pnode(gc, domid, info) < 0) {
+                    LOG(DETAIL, "Failed to call init_vnodemap\n");
+                    /* vnuma_nodemap will not be used if nr_vnodes == 0 */
+                    return ERROR_FAIL;
+                }
+            }
+            else {
+                LOG(ERROR, "The vnodes cannot be mapped to pnodes this way\n.");
+                info->nr_vnodes = 0;
+                return ERROR_FAIL;
+            }
+        }
+        /* plumb domain with vNUMA topology */
+        if (xc_domain_setvnuma(ctx->xch, domid, info->nr_vnodes,
+                                info->max_vcpus, memrange,
+                                info->vdistance, info->vcpu_to_vnode,
+                                info->vnode_to_pnode) < 0) {
+        
+           LOG(DETAIL, "Failed to set vnuma topology for domain from\n.");
+           info->nr_vnodes = 0;
+           return ERROR_FAIL;
+        }
+    }
+    else
+        LOG(DEBUG, "Will not construct vNUMA topology.\n");
+    
     libxl_domain_set_nodeaffinity(ctx, domid, &info->nodemap);
     libxl_set_vcpuaffinity_all(ctx, domid, info->max_vcpus, &info->cpumap);
 
@@ -254,6 +397,56 @@ int libxl__build_pre(libxl__gc *gc, uint32_t domid,
     rc = libxl__arch_domain_create(gc, d_config, domid);
 
     return rc;
+}
+
+/* Checks if vnuma_nodemap defined in info can be used
+ * for allocation of vnodes on physical NUMA nodes by
+ * verifying that there is enough memory on corresponding
+ * NUMA nodes.
+ */
+unsigned int libxl__vnodemap_is_usable(libxl__gc *gc, libxl_domain_build_info *info)
+{
+    unsigned int i;
+    libxl_numainfo *ninfo = NULL;
+    unsigned long long *claim;
+    unsigned int node;
+    uint64_t *mems;
+    int rc, nr_nodes;
+
+    rc = nr_nodes = 0;
+    if (info->vnode_to_pnode == NULL || info->vnuma_memszs == NULL)
+        return rc;
+    /*
+     * Cannot use specified mapping if not NUMA machine 
+     */
+    ninfo = libxl_get_numainfo(CTX, &nr_nodes);
+    if (ninfo == NULL) {
+        return rc;   
+    }
+    mems = info->vnuma_memszs;   
+    claim = calloc(info->nr_vnodes, sizeof(*claim));
+    if (claim == NULL)
+        return rc;
+    /* Sum memory request on per pnode basis */ 
+    for (i = 0; i < info->nr_vnodes; i++)
+    {
+        node = info->vnode_to_pnode[i];
+        /* Correct pnode number? */
+        if (node < nr_nodes)
+            claim[node] += (mems[i] << 20);
+        else
+            goto vmapu;
+   }
+   for (i = 0; i < nr_nodes; i++) {
+       if (claim[i] > ninfo[i].free)
+          /* Cannot complete user request, falling to default */
+          goto vmapu;
+   }
+   rc = 1;
+
+ vmapu:
+   if(claim) free(claim);
+   return rc;
 }
 
 int libxl__build_post(libxl__gc *gc, uint32_t domid,
@@ -381,7 +574,24 @@ int libxl__build_pv(libxl__gc *gc, uint32_t domid,
             }
         }
     }
+    if ( info->nr_vnodes > 0 ) { 
+        dom->vnode_to_pnode = (unsigned int *)malloc(
+                                info->nr_vnodes * sizeof(*info->vnode_to_pnode));
+        dom->vnuma_memszs = (uint64_t *)malloc(
+                                info->nr_vnodes * sizeof(*info->vnuma_memszs));
 
+        if ( dom->vnuma_memszs == NULL || dom->vnode_to_pnode == NULL ) {
+            info->nr_vnodes = 0;
+            if (dom->vnode_to_pnode) free(dom->vnode_to_pnode);
+            if (dom->vnuma_memszs) free(dom->vnuma_memszs);
+            goto out;
+        }
+        memcpy(dom->vnuma_memszs, info->vnuma_memszs,
+               sizeof(*info->vnuma_memszs) * info->nr_vnodes);
+        memcpy(dom->vnode_to_pnode, info->vnode_to_pnode,
+               sizeof(*info->vnode_to_pnode) * info->nr_vnodes);
+        dom->nr_vnodes = info->nr_vnodes;
+    }
     dom->flags = flags;
     dom->console_evtchn = state->console_port;
     dom->console_domid = state->console_domid;

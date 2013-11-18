@@ -19,4 +19,17 @@
 int libxl__arch_domain_create(libxl__gc *gc, libxl_domain_config *d_config,
                uint32_t domid);
 
+int libxl__vnuma_align_mem(libxl__gc *gc,
+                            uint32_t domid,
+                            struct libxl_domain_build_info *b_info,
+                            vmemrange_t *memblks); 
+
+unsigned long e820_memory_hole_size(unsigned long start,
+                                    unsigned long end,
+                                    struct e820entry e820[],
+                                    int nr);
+
+unsigned int libxl__vnodemap_is_usable(libxl__gc *gc,
+                                libxl_domain_build_info *info);
+
 #endif
