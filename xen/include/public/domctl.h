@@ -35,6 +35,7 @@
 #include "xen.h"
 #include "grant_table.h"
 #include "hvm/save.h"
+#include "vnuma.h"
 
 #define XEN_DOMCTL_INTERFACE_VERSION 0x00000009
 
@@ -869,6 +870,32 @@ struct xen_domctl_set_max_evtchn {
 typedef struct xen_domctl_set_max_evtchn xen_domctl_set_max_evtchn_t;
 DEFINE_XEN_GUEST_HANDLE(xen_domctl_set_max_evtchn_t);
 
+/* 
+ * XEN_DOMCTL_setvnumainfo: sets the vNUMA topology
+ * parameters from toolstack.
+ */
+struct xen_domctl_vnuma {
+    uint32_t nr_vnodes;
+    uint32_t __pad;
+    XEN_GUEST_HANDLE_64(uint) vdistance;
+    XEN_GUEST_HANDLE_64(uint) vcpu_to_vnode;
+    /* 
+     * vnodes to physical NUMA nodes mask.
+     * This will be kept on per-domain basis
+     * for requests by consumers as vnuma
+     * aware ballooning.
+     */
+    XEN_GUEST_HANDLE_64(uint) vnode_to_pnode;
+    /* 
+     * memory rages that vNUMA node can represent
+     * If more than one, its a linked list.
+     */
+    XEN_GUEST_HANDLE_64(vmemrange_t) vmemrange;
+};
+
+typedef struct xen_domctl_vnuma xen_domctl_vnuma_t;
+DEFINE_XEN_GUEST_HANDLE(xen_domctl_vnuma_t);
+
 struct xen_domctl {
     uint32_t cmd;
 #define XEN_DOMCTL_createdomain                   1
@@ -938,6 +965,7 @@ struct xen_domctl {
 #define XEN_DOMCTL_setnodeaffinity               68
 #define XEN_DOMCTL_getnodeaffinity               69
 #define XEN_DOMCTL_set_max_evtchn                70
+#define XEN_DOMCTL_setvnumainfo                  71
 #define XEN_DOMCTL_gdbsx_guestmemio            1000
 #define XEN_DOMCTL_gdbsx_pausevcpu             1001
 #define XEN_DOMCTL_gdbsx_unpausevcpu           1002
@@ -998,6 +1026,7 @@ struct xen_domctl {
         struct xen_domctl_set_broken_page_p2m set_broken_page_p2m;
         struct xen_domctl_gdbsx_pauseunp_vcpu gdbsx_pauseunp_vcpu;
         struct xen_domctl_gdbsx_domstatus   gdbsx_domstatus;
+        struct xen_domctl_vnuma             vnuma;
         uint8_t                             pad[128];
     } u;
 };

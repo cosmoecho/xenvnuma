@@ -89,4 +89,13 @@ extern unsigned int xen_processor_pmbits;
 
 extern bool_t opt_dom0_vcpus_pin;
 
+struct vnuma_info {
+    unsigned int nr_vnodes;
+    unsigned int pad;
+    unsigned int *vdistance;
+    unsigned int *vcpu_to_vnode;
+    unsigned int *vnode_to_pnode;
+    struct vmemrange *vmemrange;
+};
+
 #endif /* __XEN_DOMAIN_H__ */

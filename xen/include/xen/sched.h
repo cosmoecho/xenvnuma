@@ -417,6 +417,7 @@ struct domain
     nodemask_t node_affinity;
     unsigned int last_alloc_node;
     spinlock_t node_affinity_lock;
+    struct vnuma_info vnuma;
 };
 
 struct domain_setup_info

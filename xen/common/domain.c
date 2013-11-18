@@ -511,6 +511,15 @@ int rcu_lock_live_remote_domain_by_id(domid_t dom, struct domain **d)
     return 0;
 }
 
+static void vnuma_destroy(struct vnuma_info *vnuma)
+{
+    vnuma->nr_vnodes = 0;
+    xfree(vnuma->vmemrange);
+    xfree(vnuma->vcpu_to_vnode);
+    xfree(vnuma->vdistance);
+    xfree(vnuma->vnode_to_pnode);
+}
+
 int domain_kill(struct domain *d)
 {
     int rc = 0;
@@ -531,6 +540,7 @@ int domain_kill(struct domain *d)
         tmem_destroy(d->tmem);
         domain_set_outstanding_pages(d, 0);
         d->tmem = NULL;
+        vnuma_destroy(&d->vnuma);
         /* fallthrough */
     case DOMDYING_dying:
         rc = domain_relinquish_resources(d);

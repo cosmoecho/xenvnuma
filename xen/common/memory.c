@@ -28,6 +28,7 @@
 #include <public/memory.h>
 #include <xsm/xsm.h>
 #include <xen/trace.h>
+#include <public/vnuma.h>
 
 struct memop_args {
     /* INPUT */
@@ -732,6 +733,55 @@ long do_memory_op(unsigned long cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
         rcu_unlock_domain(d);
 
         break;
+
+    case XENMEM_get_vnuma_info:
+    {
+        struct vnuma_topology_info mtopology;
+        struct domain *d;
+
+        if ( copy_from_guest(&mtopology, arg, 1) )
+            return -EFAULT;
+        if ( (d = rcu_lock_domain_by_any_id(mtopology.domid)) == NULL )
+            return -ESRCH;
+        
+        if ( (d->vnuma.nr_vnodes == 0) ||
+             (d->vnuma.nr_vnodes > d->max_vcpus) )
+        {
+            rc = -EOPNOTSUPP;
+            goto vnumainfo_out;
+        }
+        
+        rc = -EFAULT;
+        if ( guest_handle_is_null(mtopology.vmemrange.h)    ||
+             guest_handle_is_null(mtopology.vdistance.h)    ||
+             guest_handle_is_null(mtopology.vcpu_to_vnode.h)||
+             guest_handle_is_null(mtopology.nr_vnodes.h) )
+        {
+            goto vnumainfo_out;
+        }
+
+        if ( __copy_to_guest(mtopology.vmemrange.h,
+                                d->vnuma.vmemrange,
+                                d->vnuma.nr_vnodes) != 0 )
+            goto vnumainfo_out;
+        if ( __copy_to_guest(mtopology.vdistance.h,
+                                d->vnuma.vdistance,
+                                d->vnuma.nr_vnodes * d->vnuma.nr_vnodes) != 0 )
+            goto vnumainfo_out;
+        if ( __copy_to_guest(mtopology.vcpu_to_vnode.h,
+                                d->vnuma.vcpu_to_vnode,
+                                d->max_vcpus) != 0 )
+            goto vnumainfo_out;
+
+        if ( __copy_to_guest(mtopology.nr_vnodes.h, &d->vnuma.nr_vnodes, 1) != 0 )
+            goto vnumainfo_out;
+
+        rc = 0;
+    
+    vnumainfo_out:
+        rcu_unlock_domain(d);
+        break;
+    }
 
     default:
         rc = arch_memory_op(op, arg);
