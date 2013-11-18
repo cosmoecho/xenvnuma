@@ -127,6 +127,7 @@ typedef uint64_t l4_pgentry_64_t;
 #define ROUNDUP(_x,_w) (((unsigned long)(_x)+(1UL<<(_w))-1) & ~((1UL<<(_w))-1))
 #define NRPAGES(x) (ROUNDUP(x, PAGE_SHIFT) >> PAGE_SHIFT)
 
+#define VNUMA_NO_NODE ~((unsigned int)0)
 
 /* XXX SMH: following skanky macros rely on variable p2m_size being set */
 /* XXX TJD: also, "guest_width" should be the guest's sizeof(unsigned long) */

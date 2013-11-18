@@ -111,6 +111,15 @@ struct xc_dom_image {
     struct xc_dom_phys *phys_pages;
     int realmodearea_log;
 
+    /*
+     * vNUMA topology and memory allocation structure.
+     * Defines the way to allocate memory on per NUMA
+     * physical nodes that is defined by vnode_to_pnode.
+     */
+    uint32_t nr_vnodes;
+    uint64_t *vnuma_memszs;
+    unsigned int *vnode_to_pnode;
+
     /* malloc memory pool */
     struct xc_dom_mem *memblocks;
 
@@ -360,6 +369,7 @@ static inline xen_pfn_t xc_dom_p2m_guest(struct xc_dom_image *dom,
 int arch_setup_meminit(struct xc_dom_image *dom);
 int arch_setup_bootearly(struct xc_dom_image *dom);
 int arch_setup_bootlate(struct xc_dom_image *dom);
+int arch_boot_numa_alloc(struct xc_dom_image *dom);
 
 /*
  * Local variables:
