@@ -389,6 +389,24 @@ static void dump_numa(unsigned char key)
 
 		for_each_online_node(i)
 			printk("    Node %u: %u\n", i, page_num_node[i]);
+
+		if (d->vnuma.nr_vnodes > 0)
+		{
+			printk("    Domain has %d vnodes\n", d->vnuma.nr_vnodes);
+			for (i = 0; i < d->vnuma.nr_vnodes; i++) {
+				printk("        vnode %d - pnode %d:", i,
+					d->vnuma.vnode_to_pnode[i] >= MAX_NUMNODES ? -1 : d->vnuma.vnode_to_pnode[i]);
+				printk(" %"PRIu64" MB \n",
+                                        (d->vnuma.vmemrange[i].end - d->vnuma.vmemrange[i].start) >> 20);
+			}
+
+			printk("    Domain vcpu to vnode: \n");
+			for (i = 0; i < d->max_vcpus; i++)
+				printk("%s%d %s", i % 8 == 0 ? "    " : "",
+					d->vnuma.vcpu_to_vnode[i],
+					(i + 1) % 8 == 0 ? "\n" : "");
+			printk("\n");
+		}
 	}
 
 	rcu_read_unlock(&domlist_read_lock);
