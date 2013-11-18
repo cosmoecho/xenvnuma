@@ -40,6 +40,7 @@
 #include "libxl_json.h"
 #include "libxlutil.h"
 #include "xl.h"
+#include "libxl_vnuma.h"
 
 #define CHK_ERRNO( call ) ({                                            \
         int chk_errno = (call);                                         \
@@ -622,6 +623,75 @@ vcpp_out:
     return rc;
 }
 
+static void vnuma_info_release(libxl_domain_build_info *info)
+{
+    if ( info->vnuma_memszs ) free(info->vnuma_memszs);
+    if ( info->vdistance ) free(info->vdistance);
+    if ( info->vcpu_to_vnode ) free(info->vcpu_to_vnode);
+    if ( info->vnode_to_pnode ) free(info->vnode_to_pnode);
+    info->nr_vnodes = 0;
+}
+
+static int get_list_item_uint(XLU_ConfigList *list, unsigned int i)
+{
+    const char *buf;
+    char *ep;
+    unsigned long ul;
+    int rc = -EINVAL;
+    buf = xlu_cfg_get_listitem(list, i);
+    if (!buf) 
+        return rc;
+    ul = strtoul(buf, &ep, 10);
+    if (ep == buf) 
+        return rc;
+    if (ul >= UINT16_MAX) 
+        return rc; 
+    return (int)ul;
+}
+
+static void vdistance_default(unsigned int *vdistance,
+                                unsigned int nr_vnodes,
+                                unsigned int samenode,
+                                unsigned int othernode)
+{
+    int i, j;
+    for (i = 0; i < nr_vnodes; i++)
+        for (j = 0; j < nr_vnodes; j++)
+            *(vdistance + j * nr_vnodes + i) = i == j ? samenode : othernode;
+}
+
+static void vcputovnode_default(unsigned int *vcpu_to_vnode,
+                                unsigned int nr_vnodes,
+                                unsigned int max_vcpus)
+{
+    int i;
+    if (vcpu_to_vnode == NULL)
+        return;
+    for(i = 0; i < max_vcpus; i++)
+        vcpu_to_vnode[i] = i % nr_vnodes;
+}
+
+/* Split domain memory between vNUMA nodes equally */
+static int split_vnumamem(libxl_domain_build_info *b_info)
+{
+    unsigned long long vnodemem = 0;
+    unsigned long n;
+    unsigned int i;
+
+    /* In MBytes */ 
+    vnodemem = (b_info->max_memkb >> 10) / b_info->nr_vnodes;
+    if (vnodemem < MIN_VNODE_SIZE)
+        return -1;
+    /* reminder in MBytes */ 
+    n = (b_info->max_memkb >> 10) % b_info->nr_vnodes;
+    /* get final sizes in MBytes */
+    for(i = 0; i < (b_info->nr_vnodes - 1); i++)
+        b_info->vnuma_memszs[i] = vnodemem;
+    /* add the reminder to the last node */
+    b_info->vnuma_memszs[i] = vnodemem + n;
+    return 0;
+}
+
 static void parse_config_data(const char *config_source,
                               const char *config_data,
                               int config_len,
@@ -960,6 +1030,11 @@ static void parse_config_data(const char *config_source,
         char *cmdline = NULL;
         const char *root = NULL, *extra = "";
 
+        XLU_ConfigList *vnumamemcfg, *vdistancecfg, *vnodemap, *vcpumap;
+        int nr_vnuma_regions, nr_vdist, nr_vnodemap;
+        unsigned long long vnuma_memparsed = 0;
+        unsigned long ul;
+
         xlu_cfg_replace_string (config, "kernel", &b_info->u.pv.kernel, 0);
 
         xlu_cfg_get_string (config, "root", &root, 0);
@@ -976,7 +1051,238 @@ static void parse_config_data(const char *config_source,
             fprintf(stderr, "Failed to allocate memory for cmdline\n");
             exit(1);
         }
+        
+        if (!xlu_cfg_get_long (config, "vnodes", &l, 0)) {
+            if (l > MAX_VNUMA_NODES) {
+                fprintf(stderr, "Too many vnuma nodes, max %d is allowed.\n", MAX_VNUMA_NODES);
+                exit(1);
+            }
 
+            b_info->nr_vnodes = l;
+
+            libxl_defbool_set(&b_info->vnuma_placement, false);
+            xlu_cfg_get_defbool(config, "vnuma_autoplacement", &b_info->vnuma_placement, 0);
+  
+            if (b_info->nr_vnodes != 0 && b_info->max_vcpus >= b_info->nr_vnodes) {
+                if (!xlu_cfg_get_list(config, "vnumamem",
+                                      &vnumamemcfg, &nr_vnuma_regions, 0)) {
+                    
+                    if (nr_vnuma_regions != b_info->nr_vnodes) {
+                        fprintf(stderr, "Number of numa regions is incorrect.\n");
+                        exit(1);
+                    }
+                    
+                    b_info->vnuma_memszs = calloc(b_info->nr_vnodes,
+                                                  sizeof(*b_info->vnuma_memszs));
+                    if (b_info->vnuma_memszs == NULL) {
+                        fprintf(stderr, "unable to allocate memory for vnuma ranges.\n");
+                        exit(1);
+                    }
+                    
+                    char *ep;
+                    /* 
+                     * Will parse only nr_vnodes times, even if we have more/less regions.
+                     * Take care of it later if less or discard if too many regions.
+                     */
+                    for (i = 0; i < b_info->nr_vnodes; i++) {
+                        buf = xlu_cfg_get_listitem(vnumamemcfg, i);
+                        if (!buf) {
+                            fprintf(stderr,
+                                    "xl: Unable to get element %d in vnuma memroy list.\n", i);
+                            break;
+                        }
+                        ul = strtoul(buf, &ep, 10);
+                        if (ep == buf) {
+                            fprintf(stderr,
+                                    "xl: Invalid argument parsing vnumamem: %s.\n", buf);
+                            break;
+                        }
+                        
+                        /* 32Mb is a min size for a node, taken from Linux */
+                        if (ul >= UINT32_MAX || ul < MIN_VNODE_SIZE) {
+                            fprintf(stderr, "xl: vnuma memory %lu is not withing %u - %u range.\n",
+                                    ul, MIN_VNODE_SIZE, UINT32_MAX);
+                            break;
+                        }
+                        
+                        /* memory in MBytes */
+                        b_info->vnuma_memszs[i] = ul;
+                    }
+                    
+                    /* Total memory for vNUMA parsed to verify */
+                    for(i = 0; i < nr_vnuma_regions; i++)
+                        vnuma_memparsed = vnuma_memparsed + (b_info->vnuma_memszs[i]);
+                    
+                    /* Amount of memory for vnodes same as total? */
+                    if((vnuma_memparsed << 10) != (b_info->max_memkb)) {
+                        fprintf(stderr, "xl: vnuma memory is not the same as initial domain memory size.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                } else {
+                    b_info->vnuma_memszs = calloc(b_info->nr_vnodes,
+                                                  sizeof(*b_info->vnuma_memszs));
+                    if (b_info->vnuma_memszs == NULL) {
+                        fprintf(stderr, "unable to allocate memory for vnuma ranges.\n");
+                        exit(1);
+                    }
+
+                    fprintf(stderr, "WARNING: vNUMA memory ranges were not specified.\n");
+                    fprintf(stderr, "Using default equal vnode memory size %lu Kbytes to cover %lu Kbytes.\n", 
+                                    b_info->max_memkb / b_info->nr_vnodes, b_info->max_memkb);
+
+                    if (split_vnumamem(b_info) < 0) {
+                        fprintf(stderr, "Could not split vnuma memory into equal chunks.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                }
+
+                b_info->vdistance = calloc(b_info->nr_vnodes * b_info->nr_vnodes,
+                                           sizeof(*b_info->vdistance));
+                if (b_info->vdistance == NULL) {
+                    vnuma_info_release(b_info);
+                    exit(1);
+                }
+
+                if(!xlu_cfg_get_list(config, "vdistance", &vdistancecfg, &nr_vdist, 0) &&
+                        nr_vdist == 2) {
+                    /*
+                     * If only two elements are in the vdistance list, consider
+                     * first as value for same node distance, the second as the
+                     * rest of distances.
+                     * The following is required right now to avoid non-symmetrical
+                     * distance table as it may break latest kernel.
+                     * TODO: Better way to analyze extended distance table, possibly
+                     * OS specific.
+                     */
+                     int d1, d2;
+                     d1 = get_list_item_uint(vdistancecfg, 0);
+                     d2 = get_list_item_uint(vdistancecfg, 1);
+                     
+                     if (d1 >= 0 && d2 >= 0 && d1 < d2) {
+                        vdistance_default(b_info->vdistance, b_info->nr_vnodes, d1, d2);
+                     } else {
+                        fprintf(stderr, "WARNING: Distances are not correct.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                     }
+
+                } else
+                    vdistance_default(b_info->vdistance, b_info->nr_vnodes, 10, 20);
+                    
+                b_info->vcpu_to_vnode = (unsigned int *)calloc(b_info->max_vcpus,
+                                         sizeof(*b_info->vcpu_to_vnode));
+                if (b_info->vcpu_to_vnode == NULL) {
+                    vnuma_info_release(b_info);
+                    exit(1);
+                }
+                if (!xlu_cfg_get_list(config, "vnuma_vcpumap",
+                                      &vcpumap, &nr_vnodemap, 0)) {
+                    if (nr_vnodemap == b_info->max_vcpus) {
+                        unsigned int vnodemask = 0, vnode, smask, vcpumask = 0, vmask;
+                        smask = ~(~0 << b_info->nr_vnodes);
+                        vmask = ~(~0 << nr_vnodemap);
+                        for (i = 0; i < nr_vnodemap; i++) {
+                            vnode = get_list_item_uint(vcpumap, i);
+                            if (vnode >= 0) {
+                                vnodemask |= (1 << vnode); 
+                                vcpumask  |= (1 << i);
+                                b_info->vcpu_to_vnode[i] = vnode;
+                            }
+                        }
+                        
+                        /* Did it covered all vnodes in the vcpu mask? */
+                        if ( !(((smask & vnodemask) + 1) == (1 << b_info->nr_vnodes)) ) {
+                            fprintf(stderr, "WARNING: Not all vnodes were covered in vnuma_vcpumap.\n");
+                            vnuma_info_release(b_info);
+                            exit(1);
+                        }
+                        if ( !(((vmask & vcpumask) + 1) == (1 << nr_vnodemap)) ) {
+                            fprintf(stderr, "WARNING: Not all vnode were covered in vnuma_vcpumap.\n");
+                            vnuma_info_release(b_info);
+                            exit(1);
+                        }
+                    } else {
+                        fprintf(stderr, "WARNING: Not all vcpus were covered in vnuma_vcpumap.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                }
+                else
+                    vcputovnode_default(b_info->vcpu_to_vnode,
+                                        b_info->nr_vnodes,
+                                        b_info->max_vcpus);
+
+                /* There is mapping to NUMA physical nodes? */
+                b_info->vnode_to_pnode = (unsigned int *)calloc(b_info->nr_vnodes, 
+                                                sizeof(*b_info->vnode_to_pnode));
+                if (b_info->vnode_to_pnode == NULL) {
+                    vnuma_info_release(b_info);
+                    exit(1);
+                }
+                if (!xlu_cfg_get_list(config, "vnuma_vnodemap",&vnodemap,
+                                                        &nr_vnodemap, 0)) {
+                    /* 
+                    * If not specified or incorred, will be defined
+                    * later based on the machine architecture, configuration
+                    * and memory availble when creating domain.
+                    */
+                    if (nr_vnodemap == b_info->nr_vnodes) {
+                        unsigned int vnodemask = 0, pnode, smask;
+                        smask = ~(~0 << b_info->nr_vnodes);
+                        for (i = 0; i < b_info->nr_vnodes; i++) {
+                            pnode = get_list_item_uint(vnodemap, i); 
+                            if (pnode >= 0) {
+                                vnodemask |= (1 << i);
+                                b_info->vnode_to_pnode[i] = pnode;
+                            }
+                        }
+
+                        /* Did it covered all vnodes in the mask? */
+                        if ( !(((vnodemask & smask) + 1) == (1 << nr_vnodemap)) ) {
+                            fprintf(stderr, "WARNING: Not all vnodes were covered vnuma_vnodemap.\n");
+                            
+                            if (libxl_defbool_val(b_info->vnuma_placement)) {
+                                fprintf(stderr, "Automatic placement will be used for vnodes.\n");
+                                free(b_info->vnode_to_pnode);
+                                b_info->vnode_to_pnode = NULL;
+                            } else {
+                                vnuma_info_release(b_info);
+                                exit(1);
+                            }
+                        }
+                    } else {
+                        fprintf(stderr, "WARNING: Incorrect vnuma_vnodemap.\n");
+                        
+                        if (libxl_defbool_val(b_info->vnuma_placement)) {
+                            fprintf(stderr, "Automatic placement will be used for vnodes.\n");
+                            free(b_info->vnode_to_pnode);
+                            b_info->vnode_to_pnode = NULL;
+                        } else {
+                            vnuma_info_release(b_info);
+                            exit(1);
+                        }
+                    }
+                } else {
+                    fprintf(stderr, "WARNING: Missing vnuma_vnodemap.\n");
+
+                    if (libxl_defbool_val(b_info->vnuma_placement)) {
+                        fprintf(stderr, "Automatic placement will be used for vnodes.\n");
+                        free(b_info->vnode_to_pnode);
+                        b_info->vnode_to_pnode = NULL;
+                    } else {
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                }
+            }
+            else 
+                b_info->nr_vnodes = 0;
+        }
+        else 
+            b_info->nr_vnodes = 0;
+        
         xlu_cfg_replace_string (config, "bootloader", &b_info->u.pv.bootloader, 0);
         switch (xlu_cfg_get_list_as_string_list(config, "bootloader_args",
                                       &b_info->u.pv.bootloader_args, 1))
