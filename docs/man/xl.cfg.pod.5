@@ -216,6 +216,66 @@ if the values of B<memory=> and B<maxmem=> differ.
 A "pre-ballooned" HVM guest needs a balloon driver, without a balloon driver
 it will crash.
 
+=item B<vnuma_nodes=N>
+
+Number of vNUMA nodes the guest will be initialized with on boot.
+
+=item B<vnuma_mem=[vmem1, vmem2, ...]>
+
+The vnode memory sizes defined in MBytes. If the sum of all vnode memories
+does not match the domain memory or not all the nodes defined here, will fail.
+If not specified, memory will be equally split between vnodes. Currently
+minimum vnode size is 64MB.
+
+Example: vnuma_mem=[1024, 1024, 2048, 2048]
+
+=item B<vdistance=[d1, d2]>
+
+Defines the distance table for vNUMA nodes. Distance for NUMA machines usually
+ represented by two dimensional array and all distance may be spcified in one
+line here, by rows. Distance can be specified as two numbers [d1, d2],
+where d1 is same node distance, d2 is a value for all other distances.
+If not specified, the defaul distance will be used, e.g. [10, 20].
+
+Examples:
+vnodes = 3
+vdistance=[10, 20]
+will expand to this distance table (this is default setting as well):
+[10, 20, 20]
+[20, 10, 20]
+[20, 20, 10]
+
+=item B<vnuma_vcpumap=[vcpu1, vcpu2, ...]>
+
+Defines vcpu to vnode mapping as a string of integers, representing node
+numbers. If not defined, the vcpus are interleaved over the virtual nodes.
+Current limitation: vNUMA nodes have to have at least one vcpu, otherwise
+default vcpu_to_vnode will be used.
+
+Example:
+to map 4 vcpus to 2 nodes - 0,1 vcpu -> vnode1, 2,3 vcpu -> vnode2:
+vnuma_vcpumap = [0, 0, 1, 1]
+
+=item B<vnuma_vnodemap=[p1, p2, ..., pn]>
+
+vnode to pnode mapping. Can be configured if manual vnode allocation
+required. Will be only taken into effect on real NUMA machines and if
+memory or other constraints do not prevent it. If the mapping is ok,
+automatic NUMA placement will be disabled. If the mapping incorrect
+and vnuma_autoplacement is true, automatical numa placement will be used,
+otherwise fails to create domain.
+
+Example:
+assume two node NUMA node machine:
+vnuma_vndoemap=[1, 0]
+first vnode will be placed on node 1, second on node0.
+
+=item B<vnuma_autoplacement=[0|1]>
+
+If enabled, automatically will find the best placement physical node candidate for
+each vnode if vnuma_vnodemap is incorrect or memory requirements prevent
+using it. Set to '0' by default.
+
 =back
 
 =head3 Event Actions
