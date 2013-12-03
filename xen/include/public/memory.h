@@ -339,6 +339,23 @@ struct xen_pod_target {
 };
 typedef struct xen_pod_target xen_pod_target_t;
 
+/*
+ * XENMEM_get_vnuma_info used by caller to retrieve
+ * vNUMA topology constructed for particular domain.
+ *
+ * The data exchanged is presented by vnuma_topology_info.
+ */
+#define XENMEM_get_vnuma_info               25
+
+/*
+ * XENMEM_get_vnuma_nodes used to retreive number of nodes
+ * and vcpus for allocating correct amount of memory for
+ * vnuma topology.
+ */
+#define XENMEM_get_vnodes_vcpus             26
+
+#define XENMEM_get_vnuma_pnode              27
+
 #if defined(__XEN__) || defined(__XEN_TOOLS__)
 
 #ifndef uint64_aligned_t

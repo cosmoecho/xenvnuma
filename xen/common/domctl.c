@@ -29,6 +29,7 @@
 #include <asm/page.h>
 #include <public/domctl.h>
 #include <xsm/xsm.h>
+#include <public/vnuma.h>
 
 static DEFINE_SPINLOCK(domctl_lock);
 DEFINE_SPINLOCK(vcpu_alloc_lock);
@@ -886,6 +887,85 @@ long do_domctl(XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
         d->max_evtchn_port = min_t(unsigned int,
                                    op->u.set_max_evtchn.max_port,
                                    INT_MAX);
+    }
+    break;
+
+    case XEN_DOMCTL_setvnumainfo:
+    {
+        unsigned int dist_size, nr_vnodes, i;
+
+        ret = -EINVAL;
+
+        /*
+         * If number of vnodes was set before,
+         * dont initilize it again.
+         */
+        if ( d->vnuma.nr_vnodes > 0 )
+            break;
+
+        nr_vnodes = op->u.vnuma.nr_vnodes;
+        if ( nr_vnodes == 0 )
+            break;
+        if ( nr_vnodes > (UINT_MAX / nr_vnodes) )
+            break;
+
+        ret = -EFAULT;
+        if ( guest_handle_is_null(op->u.vnuma.vdistance)     ||
+             guest_handle_is_null(op->u.vnuma.vmemrange)     ||
+             guest_handle_is_null(op->u.vnuma.vcpu_to_vnode) ||
+             guest_handle_is_null(op->u.vnuma.vnode_to_pnode) )
+            goto setvnumainfo_out;
+
+        dist_size = nr_vnodes * nr_vnodes;
+
+        d->vnuma.vdistance = xmalloc_array(unsigned int, dist_size);
+        d->vnuma.vmemrange = xmalloc_array(vmemrange_t, nr_vnodes);
+        d->vnuma.vcpu_to_vnode = xmalloc_array(unsigned int, d->max_vcpus);
+        d->vnuma.vnode_to_pnode = xmalloc_array(unsigned int, nr_vnodes);
+
+        if ( d->vnuma.vdistance == NULL ||
+             d->vnuma.vmemrange == NULL ||
+             d->vnuma.vcpu_to_vnode == NULL ||
+             d->vnuma.vnode_to_pnode == NULL )
+        {
+            ret = -ENOMEM;
+            goto setvnumainfo_out;
+        }
+
+        if ( unlikely(copy_from_guest(d->vnuma.vdistance,
+                                    op->u.vnuma.vdistance,
+                                    dist_size)) )
+            goto setvnumainfo_out;
+        if ( unlikely(copy_from_guest(d->vnuma.vmemrange,
+                                    op->u.vnuma.vmemrange,
+                                    nr_vnodes)) )
+            goto setvnumainfo_out;
+        if ( unlikely(copy_from_guest(d->vnuma.vcpu_to_vnode,
+                                    op->u.vnuma.vcpu_to_vnode,
+                                    d->max_vcpus)) )
+            goto setvnumainfo_out;
+        if ( unlikely(copy_from_guest(d->vnuma.vnode_to_pnode,
+                                    op->u.vnuma.vnode_to_pnode,
+                                    nr_vnodes)) )
+            goto setvnumainfo_out;
+
+        /* Everything is good, lets set the number of vnodes */
+        d->vnuma.nr_vnodes = nr_vnodes;
+
+        for ( i = 0; i < nr_vnodes; i++ )
+            d->vnuma.vmemrange[i]._reserved = 0;
+
+        ret = 0;
+
+ setvnumainfo_out:
+        if ( ret != 0 )
+        {
+            d->vnuma.nr_vnodes = 0;
+            xfree(d->vnuma.vdistance);
+            xfree(d->vnuma.vmemrange);
+            xfree(d->vnuma.vcpu_to_vnode);
+            xfree(d->vnuma.vnode_to_pnode);
+        }
     }
     break;
 
