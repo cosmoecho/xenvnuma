@@ -759,7 +759,7 @@ static int x86_shadow(xc_interface *xch, domid_t domid)
 int arch_setup_meminit(struct xc_dom_image *dom)
 {
     int rc;
-    xen_pfn_t pfn, allocsz, i, j, mfn;
+    xen_pfn_t pfn, i, j, mfn;
 
     rc = x86_compat(dom->xch, dom->guest_domid, dom->guest_type);
     if ( rc )
@@ -802,6 +802,7 @@ int arch_setup_meminit(struct xc_dom_image *dom)
     else
     {
         /* try to claim pages for early warning of insufficient memory avail */
+        rc = 0;
         if ( dom->claim_enabled ) {
             rc = xc_domain_claim_pages(dom->xch, dom->guest_domid,
                                        dom->total_pages);
@@ -813,22 +814,60 @@ int arch_setup_meminit(struct xc_dom_image *dom)
             dom->p2m_host[pfn] = pfn;
         
         /* allocate guest memory */
-        for ( i = rc = allocsz = 0;
-              (i < dom->total_pages) && !rc;
-              i += allocsz )
-        {
-            allocsz = dom->total_pages - i;
-            if ( allocsz > 1024*1024 )
-                allocsz = 1024*1024;
-            rc = xc_domain_populate_physmap_exact(
-                dom->xch, dom->guest_domid, allocsz,
-                0, 0, &dom->p2m_host[i]);
-        }
+        rc = arch_boot_numa_alloc(dom);
+        if ( rc )
+            return rc;
 
         /* Ensure no unclaimed pages are left unused.
          * OK to call if hadn't done the earlier claim call. */
         (void)xc_domain_claim_pages(dom->xch, dom->guest_domid,
                                     0 /* cancels the claim */);
+    }
+    return rc;
+}
+
+/*
+ * Any pv guest will have at least one vnuma node
+ * with vnuma_memszs[0] = domain memory and the rest
+ * topology initialized with default values.
+ */
+int arch_boot_numa_alloc(struct xc_dom_image *dom)
+{
+    int rc;
+    unsigned int n;
+    unsigned long long vnode_pages;
+    unsigned long long allocsz = 0, node_pfn_base, i;
+    unsigned long memflags;
+
+    rc = allocsz = node_pfn_base = 0;
+
+    allocsz = 0;
+    for ( n = 0; n < dom->nr_vnodes; n++ )
+    {
+        memflags = 0;
+        if ( dom->vnode_to_pnode[n] != VNUMA_NO_NODE )
+        {
+            memflags |= XENMEMF_exact_node(dom->vnode_to_pnode[n]);
+            memflags |= XENMEMF_exact_node_request;
+        }
+        vnode_pages = (dom->vnuma_memszs[n] << 20) >> PAGE_SHIFT_X86;
+        for ( i = 0; (i < vnode_pages) && !rc; i += allocsz )
+        {
+            allocsz = vnode_pages - i;
+            if ( allocsz > 1024*1024 )
+                allocsz = 1024*1024;
+                rc = xc_domain_populate_physmap_exact(
+                                    dom->xch, dom->guest_domid, allocsz,
+                                    0, memflags, &dom->p2m_host[node_pfn_base + i]);
+        }
+        if ( rc )
+        {
+            xc_dom_panic(dom->xch, XC_INTERNAL_ERROR,
+                    "%s: Failed allocation of %Lu pages for vnode %d on pnode %d out of %lu\n",
+                    __FUNCTION__, vnode_pages, n, dom->vnode_to_pnode[n], dom->total_pages);
+            return rc;
+        }
+        node_pfn_base += i;
     }
 
     return rc;
