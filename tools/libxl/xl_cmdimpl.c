@@ -40,6 +40,7 @@
 #include "libxl_json.h"
 #include "libxlutil.h"
 #include "xl.h"
+#include "libxl_vnuma.h"
 
 #define CHK_ERRNO( call ) ({                                            \
         int chk_errno = (call);                                         \
@@ -622,6 +623,134 @@ vcpp_out:
     return rc;
 }
 
+/* Should exit after calling this */
+static void vnuma_info_release(libxl_domain_build_info *info)
+{
+    free(info->vnuma_memszs);
+    free(info->vdistance);
+    free(info->vcpu_to_vnode);
+    free(info->vnode_to_pnode);
+    info->nr_vnodes = 0;
+}
+
+static void vdistance_default(unsigned int *vdistance,
+                                unsigned int nr_vnodes,
+                                unsigned int samenode,
+                                unsigned int othernode)
+{
+    int i, j;
+    for (i = 0; i < nr_vnodes; i++)
+        for (j = 0; j < nr_vnodes; j++)
+            *(vdistance + j * nr_vnodes + i) = i == j ? samenode : othernode;
+}
+
+static void vcputovnode_default(unsigned int *vcpu_to_vnode,
+                                unsigned int nr_vnodes,
+                                unsigned int max_vcpus)
+{
+    int i;
+    for(i = 0; i < max_vcpus; i++)
+        vcpu_to_vnode[i] = i % nr_vnodes;
+}
+
+/* Split domain memory between vNUMA nodes equally */
+static int split_vnumamem(libxl_domain_build_info *b_info)
+{
+    unsigned long long vnodemem = 0;
+    unsigned long n;
+    unsigned int i;
+
+    /* In MBytes */
+    vnodemem = (b_info->max_memkb >> 10) / b_info->nr_vnodes;
+    if (vnodemem < MIN_VNODE_SIZE)
+        return -1;
+    /* reminder in MBytes */
+    n = (b_info->max_memkb >> 10) % b_info->nr_vnodes;
+    /* get final sizes in MBytes */
+    for(i = 0; i < (b_info->nr_vnodes - 1); i++)
+        b_info->vnuma_memszs[i] = vnodemem;
+    /* add the reminder to the last node */
+    b_info->vnuma_memszs[i] = vnodemem + n;
+    return 0;
+}
+
+static void vnode_to_pnode_default(unsigned int *vnode_to_pnode,
+                                   unsigned int nr_vnodes)
+{
+    unsigned int i;
+    for (i = 0; i < nr_vnodes; i++)
+        vnode_to_pnode[i] = VNUMA_NO_NODE;
+}
+
+/*
+ * vNUMA zero config initialization for every pv domain that has
+ * no vnuma defined in config file.
+ */
+static int vnuma_zero_config(libxl_domain_build_info *b_info)
+{
+    b_info->nr_vnodes = 1;
+    /* dont leak memory with realloc */
+    unsigned int *vdist, *vntop, *vcputov;
+    uint64_t *memsz;
+
+    /* all memory goes to this one vnode */
+    memsz = b_info->vnuma_memszs;
+    b_info->vnuma_memszs = (uint64_t *)realloc(b_info->vnuma_memszs,
+                                b_info->nr_vnodes *
+                                sizeof(*b_info->vnuma_memszs));
+    if (b_info->vnuma_memszs == NULL) {
+        b_info->vnuma_memszs = memsz;
+        goto bad_vnumazerocfg;
+    }
+    b_info->vnuma_memszs[0] = b_info->max_memkb >> 10;
+
+    /* all vcpus assigned to this vnode */
+    vcputov = b_info->vcpu_to_vnode;
+    b_info->vcpu_to_vnode = (unsigned int *)realloc(
+                             b_info->vcpu_to_vnode,
+                             b_info->max_vcpus *
+                             sizeof(*b_info->vcpu_to_vnode));
+    if (b_info->vcpu_to_vnode == NULL) {
+        b_info->vcpu_to_vnode = vcputov;
+        goto bad_vnumazerocfg;
+    }
+    vcputovnode_default(b_info->vcpu_to_vnode,
+                        b_info->nr_vnodes,
+                        b_info->max_vcpus);
+
+    /* default vdistance 10 */
+    vdist = b_info->vdistance;
+    b_info->vdistance = (unsigned int *)realloc(b_info->vdistance,
+                         b_info->nr_vnodes * b_info->nr_vnodes *
+                         sizeof(*b_info->vdistance));
+    if (b_info->vdistance == NULL) {
+        b_info->vdistance = vdist;
+        goto bad_vnumazerocfg;
+    }
+    vdistance_default(b_info->vdistance, b_info->nr_vnodes, 10, 10);
+
+    /* VNUMA_NO_NODE for vnode_to_pnode */
+    vntop = b_info->vnode_to_pnode;
+    b_info->vnode_to_pnode = (unsigned int *)realloc(b_info->vnode_to_pnode,
+                             b_info->nr_vnodes *
+                             sizeof(*b_info->vnode_to_pnode));
+    if (b_info->vnode_to_pnode == NULL) {
+        b_info->vnode_to_pnode = vntop;
+        goto bad_vnumazerocfg;
+    }
+    vnode_to_pnode_default(b_info->vnode_to_pnode, b_info->nr_vnodes);
+
+    /*
+     * will be placed to some physical nodes defined by automatic
+     * numa placement or VNUMA_NO_NODE will not request exact node
+     */
+    libxl_defbool_set(&b_info->vnuma_placement, true);
+    return 0;
+
+bad_vnumazerocfg:
+    return -1;
+}
+
 static void parse_config_data(const char *config_source,
                               const char *config_data,
                               int config_len,
@@ -960,6 +1089,11 @@ static void parse_config_data(const char *config_source,
         char *cmdline = NULL;
         const char *root = NULL, *extra = "";
 
+        XLU_ConfigList *vnumamemcfg;
+        int nr_vnuma_regions;
+        unsigned long long vnuma_memparsed = 0;
+        unsigned long ul;
+
         xlu_cfg_replace_string (config, "kernel", &b_info->u.pv.kernel, 0);
 
         xlu_cfg_get_string (config, "root", &root, 0);
@@ -976,6 +1110,106 @@ static void parse_config_data(const char *config_source,
             fprintf(stderr, "Failed to allocate memory for cmdline\n");
             exit(1);
         }
+
+        libxl_defbool_set(&b_info->vnuma_placement, false);
+
+        if (!xlu_cfg_get_long (config, "vnodes", &l, 0)) {
+            if (l > MAX_VNUMA_NODES) {
+                fprintf(stderr, "Too many vnuma nodes, max %d is allowed.\n", MAX_VNUMA_NODES);
+                exit(1);
+            }
+
+            b_info->nr_vnodes = l;
+
+            xlu_cfg_get_defbool(config, "vnuma_autoplacement", &b_info->vnuma_placement, 0);
+
+            if (b_info->nr_vnodes != 0 && b_info->max_vcpus >= b_info->nr_vnodes) {
+                if (!xlu_cfg_get_list(config, "vnumamem",
+                                      &vnumamemcfg, &nr_vnuma_regions, 0)) {
+
+                    if (nr_vnuma_regions != b_info->nr_vnodes) {
+                        fprintf(stderr, "Number of numa regions is incorrect.\n");
+                        exit(1);
+                    }
+
+                    b_info->vnuma_memszs = calloc(b_info->nr_vnodes,
+                                                  sizeof(*b_info->vnuma_memszs));
+                    if (b_info->vnuma_memszs == NULL) {
+                        fprintf(stderr, "unable to allocate memory for vnuma ranges.\n");
+                        exit(1);
+                    }
+
+                    char *ep;
+                    /*
+                     * Will parse only nr_vnodes times, even if we have more/less regions.
+                     * Take care of it later if less or discard if too many regions.
+                     */
+                    for (i = 0; i < b_info->nr_vnodes; i++) {
+                        buf = xlu_cfg_get_listitem(vnumamemcfg, i);
+                        if (!buf) {
+                            fprintf(stderr,
+                                    "xl: Unable to get element %d in vnuma memroy list.\n", i);
+                            break;
+                        }
+                        ul = strtoul(buf, &ep, 10);
+                        if (ep == buf) {
+                            fprintf(stderr,
+                                    "xl: Invalid argument parsing vnumamem: %s.\n", buf);
+                            break;
+                        }
+
+                        /* 32Mb is a min size for a node, taken from Linux */
+                        if (ul >= UINT32_MAX || ul < MIN_VNODE_SIZE) {
+                            fprintf(stderr, "xl: vnuma memory %lu is not withing %u - %u range.\n",
+                                    ul, MIN_VNODE_SIZE, UINT32_MAX);
+                            break;
+                        }
+
+                        /* memory in MBytes */
+                        b_info->vnuma_memszs[i] = ul;
+                    }
+
+                    /* Total memory for vNUMA parsed to verify */
+                    for(i = 0; i < nr_vnuma_regions; i++)
+                        vnuma_memparsed = vnuma_memparsed + (b_info->vnuma_memszs[i]);
+
+                    /* Amount of memory for vnodes same as total? */
+                    if((vnuma_memparsed << 10) != (b_info->max_memkb)) {
+                        fprintf(stderr, "xl: vnuma memory is not the same as initial domain memory size.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                } else {
+                    b_info->vnuma_memszs = calloc(b_info->nr_vnodes,
+                                                  sizeof(*b_info->vnuma_memszs));
+                    if (b_info->vnuma_memszs == NULL) {
+                        vnuma_info_release(b_info);
+                        fprintf(stderr, "unable to allocate memory for vnuma ranges.\n");
+                        exit(1);
+                    }
+
+                    fprintf(stderr, "WARNING: vNUMA memory ranges were not specified.\n");
+                    fprintf(stderr, "Using default equal vnode memory size %lu Kbytes to cover %lu Kbytes.\n",
+                                    b_info->max_memkb / b_info->nr_vnodes, b_info->max_memkb);
+
+                    if (split_vnumamem(b_info) < 0) {
+                        fprintf(stderr, "Could not split vnuma memory into equal chunks.\n");
+                        vnuma_info_release(b_info);
+                        exit(1);
+                    }
+                }
+            }
+            else
+                if (vnuma_zero_config(b_info)) {
+                    vnuma_info_release(b_info);
+                    exit(1);
+                }
+        }
+        else
+            if (vnuma_zero_config(b_info)) {
+                vnuma_info_release(b_info);
+                exit(1);
+            }
 
         xlu_cfg_replace_string (config, "bootloader", &b_info->u.pv.bootloader, 0);
         switch (xlu_cfg_get_list_as_string_list(config, "bootloader_args",
