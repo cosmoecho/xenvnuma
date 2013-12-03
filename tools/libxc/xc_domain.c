@@ -1776,6 +1776,70 @@ int xc_domain_set_max_evtchn(xc_interface *xch, uint32_t domid,
     return do_domctl(xch, &domctl);
 }
 
+/* Plumbs Xen with vNUMA topology */
+int xc_domain_setvnuma(xc_interface *xch,
+                        uint32_t domid,
+                        uint16_t nr_vnodes,
+                        uint16_t nr_vcpus,
+                        vmemrange_t *vmemrange,
+                        unsigned int *vdistance,
+                        unsigned int *vcpu_to_vnode,
+                        unsigned int *vnode_to_pnode)
+{
+    int rc;
+    DECLARE_DOMCTL;
+    DECLARE_HYPERCALL_BOUNCE(vmemrange, sizeof(*vmemrange) * nr_vnodes,
+                                    XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    DECLARE_HYPERCALL_BOUNCE(vdistance, sizeof(*vdistance) *
+                                    nr_vnodes * nr_vnodes,
+                                    XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    DECLARE_HYPERCALL_BOUNCE(vcpu_to_vnode, sizeof(*vcpu_to_vnode) * nr_vcpus,
+                                    XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    DECLARE_HYPERCALL_BOUNCE(vnode_to_pnode, sizeof(*vnode_to_pnode) *
+                                    nr_vnodes,
+                                    XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
+    if ( nr_vnodes == 0 ) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ( vdistance == NULL || vcpu_to_vnode == NULL ||
+         vmemrange == NULL || vnode_to_pnode == NULL ) {
+        PERROR("Incorrect parameters for XEN_DOMCTL_setvnumainfo.\n");
+        errno = EINVAL;
+        return -1;
+    }
+
+    if ( xc_hypercall_bounce_pre(xch, vmemrange)      ||
+         xc_hypercall_bounce_pre(xch, vdistance)      ||
+         xc_hypercall_bounce_pre(xch, vcpu_to_vnode)  ||
+         xc_hypercall_bounce_pre(xch, vnode_to_pnode) ) {
+        PERROR("Could not bounce buffer for xc_domain_setvnuma.\n");
+        return -1;
+    }
+
+    set_xen_guest_handle(domctl.u.vnuma.vmemrange, vmemrange);
+    set_xen_guest_handle(domctl.u.vnuma.vdistance, vdistance);
+    set_xen_guest_handle(domctl.u.vnuma.vcpu_to_vnode, vcpu_to_vnode);
+    set_xen_guest_handle(domctl.u.vnuma.vnode_to_pnode, vnode_to_pnode);
+
+    domctl.cmd = XEN_DOMCTL_setvnumainfo;
+    domctl.domain = (domid_t)domid;
+    domctl.u.vnuma.nr_vnodes = nr_vnodes;
+    domctl.u.vnuma.__pad = 0;
+
+    rc = do_domctl(xch, &domctl);
+
+    xc_hypercall_bounce_post(xch, vmemrange);
+    xc_hypercall_bounce_post(xch, vdistance);
+    xc_hypercall_bounce_post(xch, vcpu_to_vnode);
+    xc_hypercall_bounce_post(xch, vnode_to_pnode);
+
+    if ( rc )
+        errno = EFAULT;
+    return rc;
+}
+
 /*
  * Local variables:
  * mode: C
