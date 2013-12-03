@@ -347,9 +347,10 @@ EXPORT_SYMBOL(node_data);
 static void dump_numa(unsigned char key)
 {
 	s_time_t now = NOW();
-	int i;
+	int i, j, n;
 	struct domain *d;
 	struct page_info *page;
+        char tmp[6];
 	unsigned int page_num_node[MAX_NUMNODES];
 
 	printk("'%c' pressed -> dumping numa info (now-0x%X:%08X)\n", key,
@@ -389,6 +390,33 @@ static void dump_numa(unsigned char key)
 
 		for_each_online_node(i)
 			printk("    Node %u: %u\n", i, page_num_node[i]);
+		if (d->vnuma.nr_vnodes > 0)
+		{
+			printk("    Domain has %d vnodes\n", d->vnuma.nr_vnodes);
+			for (i = 0; i < d->vnuma.nr_vnodes; i++) {
+				n = 0;
+				snprintf(tmp, 5, "%d", d->vnuma.vnode_to_pnode[i]);
+				printk("        vnode %d - pnode %s", i,
+						d->vnuma.vnode_to_pnode[i] >= MAX_NUMNODES ? "any" : tmp);
+				printk(" %"PRIu64" MB, ",
+						(d->vnuma.vmemrange[i].end - d->vnuma.vmemrange[i].start) >> 20);
+				printk("vcpus: ");
+				for (j = 0; j < d->max_vcpus; j++) {
+					if (d->vnuma.vcpu_to_vnode[j] == i) {
+						if (!((n + 1) % 8))
+							printk("%d\n", j);
+						else {
+							if ( !(n % 8) && n != 0 )
+								printk("%s%d ", "             ", j);
+							else
+								printk("%d ", j);
+						}
+						n++;
+					}
+				}
+				printk("\n");
+			}
+		}
 	}
 
 	rcu_read_unlock(&domlist_read_lock);
