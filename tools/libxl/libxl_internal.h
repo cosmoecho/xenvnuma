@@ -2888,6 +2888,10 @@ void libxl__numa_candidate_put_nodemap(libxl__gc *gc,
     libxl_bitmap_copy(CTX, &cndt->nodemap, nodemap);
 }
 
+int libxl__init_vnode_to_pnode(libxl__gc *gc, uint32_t domid,
+                                libxl_domain_build_info *info);
+
+
 /*
  * Inserts "elm_new" into the sorted list "head".
  *
@@ -2937,6 +2941,8 @@ void libxl__numa_candidate_put_nodemap(libxl__gc *gc,
  */
 #define CTYPE(isfoo,c) (isfoo((unsigned char)(c)))
 
+unsigned int libxl__vnodemap_is_usable(libxl__gc *gc,
+                                libxl_domain_build_info *info);
 
 #endif
 

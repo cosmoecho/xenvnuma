@@ -22,4 +22,10 @@ int libxl__arch_domain_create(libxl__gc *gc, libxl_domain_config *d_config,
 int libxl__arch_domain_configure(libxl__gc *gc,
                                  libxl_domain_build_info *info,
                                  struct xc_dom_image *dom);
+
+int libxl__vnuma_align_mem(libxl__gc *gc,
+                            uint32_t domid,
+                            struct libxl_domain_build_info *b_info,
+                            vmemrange_t *memblks);
+
 #endif

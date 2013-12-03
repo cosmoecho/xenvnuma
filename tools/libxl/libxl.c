@@ -4658,6 +4658,24 @@ static int libxl__set_vcpuonline_qmp(libxl__gc *gc, uint32_t domid,
     return 0;
 }
 
+int libxl_domain_setvnuma(libxl_ctx *ctx,
+                            uint32_t domid,
+                            uint16_t nr_vnodes,
+                            uint16_t nr_vcpus,
+                            vmemrange_t *vmemrange,
+                            unsigned int *vdistance,
+                            unsigned int *vcpu_to_vnode,
+                            unsigned int *vnode_to_pnode)
+{
+    int ret;
+    ret = xc_domain_setvnuma(ctx->xch, domid, nr_vnodes,
+                                nr_vcpus, vmemrange,
+                                vdistance,
+                                vcpu_to_vnode,
+                                vnode_to_pnode);
+    return ret;
+}
+
 int libxl_set_vcpuonline(libxl_ctx *ctx, uint32_t domid, libxl_bitmap *cpumap)
 {
     GC_INIT(ctx);

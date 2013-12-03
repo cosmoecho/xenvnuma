@@ -19,6 +19,8 @@
 
 #include "libxl_internal.h"
 
+#include "libxl_vnuma.h"
+
 /*
  * What follows are helpers for generating all the k-combinations
  * without repetitions of a set S with n elements in it. Formally
@@ -497,6 +499,53 @@ int libxl__get_numa_candidate(libxl__gc *gc,
     libxl_numainfo_list_free(ninfo, nr_nodes);
     libxl_cputopology_list_free(tinfo, nr_cpus);
     return rc;
+}
+
+/*
+ * Checks if vnuma_nodemap defined in info can be used
+ * for allocation of vnodes on physical NUMA nodes by
+ * verifying that there is enough memory on corresponding
+ * NUMA nodes.
+ */
+unsigned int libxl__vnodemap_is_usable(libxl__gc *gc, libxl_domain_build_info *info)
+{
+    unsigned int i;
+    libxl_numainfo *ninfo = NULL;
+    unsigned long long *claim;
+    unsigned int node;
+    uint64_t *mems;
+    int rc, nr_nodes;
+
+    rc = nr_nodes = 0;
+
+    /*
+     * Cannot use specified mapping if not NUMA machine
+     */
+    ninfo = libxl_get_numainfo(CTX, &nr_nodes);
+    if (ninfo == NULL)
+        return rc;
+
+    mems = info->vnuma_memszs;
+    claim = libxl__calloc(gc, info->nr_vnodes, sizeof(*claim));
+    /* Sum memory request on per pnode basis */
+    for (i = 0; i < info->nr_vnodes; i++)
+    {
+        node = info->vnode_to_pnode[i];
+        /* Correct pnode number? */
+        if (node < nr_nodes)
+            claim[node] += (mems[i] << 20);
+        else
+            goto vmapu;
+   }
+   for (i = 0; i < nr_nodes; i++) {
+       if (claim[i] > ninfo[i].free)
+          /* Cannot complete user request, falling to default */
+          goto vmapu;
+   }
+   rc = 1;
+
+ vmapu:
+   return rc;
 }
 
 /*
